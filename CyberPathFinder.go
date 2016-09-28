@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
+	"flag"
+	log "github.com/Sirupsen/logrus"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"log"
 	"net"
 	"os"
 	"time"
@@ -16,6 +18,47 @@ type ICMPEchoResponse struct {
 	ControlMessage *ipv4.ControlMessage
 }
 
+func LogEchoMessage(message icmp.Message) {
+	log.Debugf(`Echo message
+		Type: %v
+		Code: %v
+		Body:
+		  ID: %v
+		  Data: %v
+		  Seq: %v`,
+		message.Type,
+		message.Code,
+		message.Body.(*icmp.Echo).ID,
+		message.Body.(*icmp.Echo).Data,
+		message.Body.(*icmp.Echo).Seq)
+}
+
+func LogDestinationUnreachableMessage(message icmp.Message) {
+	log.Debugf(`Destination Unreachable message
+		Type: %v
+		Code: %v
+		Body:
+		  Data: %v
+		  Extensions: %v`,
+		message.Type,
+		message.Code,
+		message.Body.(*icmp.DstUnreach).Data,
+		message.Body.(*icmp.DstUnreach).Extensions)
+}
+
+func LogTimeExceededMessage(message icmp.Message) {
+	log.Debugf(`Time Exceeded message
+		Type: %v
+		Code: %v
+		Body:
+		  Data: %v
+		  Extensions: %v`,
+		message.Type,
+		message.Code,
+		message.Body.(*icmp.TimeExceeded).Data,
+		message.Body.(*icmp.TimeExceeded).Extensions)
+}
+
 func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int) (ICMPEchoResponse, error) {
 	messageId := os.Getpid() & 0xffff
 
@@ -24,10 +67,12 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 		Code: 0,
 		Body: &icmp.Echo{
 			ID:   messageId,
-			Data: []byte("CYBER-PATH-FINDER"),
+			Data: []byte("ECHOOOOOOOOOOO"),
 			Seq:  seq,
 		},
 	}
+
+	LogEchoMessage(echoMessage)
 
 	var response ICMPEchoResponse
 
@@ -62,6 +107,8 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 
 	// determine whether the received message is ours
 	gotResponse := false
+	var errorMessage error
+	errorMessage = nil
 	for gotResponse == false {
 		// Read until we find the response to our message
 		numberOfBytesRead, controlMessage, peer, err := p.ReadFrom(readBuffer)
@@ -78,6 +125,7 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 		// TODO: Catch all ICMP message types
 		switch readMessage.Type {
 		case ipv4.ICMPTypeTimeExceeded:
+			LogTimeExceededMessage(*readMessage)
 			messageBody := readMessage.Body.(*icmp.TimeExceeded)
 
 			// get original message
@@ -87,15 +135,30 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 				// must not be our message!
 				continue
 			}
-			originalMessageBody := originalMessage.Body.(*icmp.Echo)
+			originalMessageBody := originalMessage.Body
+			log.Debug("hi")
+			log.Debug(originalMessageBody)
 
-			if originalMessageBody.ID == messageId && originalMessageBody.Seq == seq {
-				response.Message = readMessage
-				response.Source = peer
-				response.ControlMessage = controlMessage
-				gotResponse = true
+			gotResponse = true
+		case ipv4.ICMPTypeDestinationUnreachable:
+			LogDestinationUnreachableMessage(*readMessage)
+			messageBody := readMessage.Body.(*icmp.DstUnreach)
+
+			// get original message
+			originalMessageBuffer := messageBody.Data[len(messageBody.Data)-writeBufferLen:]
+			originalMessage, err := icmp.ParseMessage(1, originalMessageBuffer)
+			if err != nil {
+				// must not be our message!
+				continue
 			}
+			originalMessageBody := originalMessage.Body.(*icmp.DefaultMessageBody)
+
+			log.Debug(originalMessageBody)
+
+			gotResponse = true
+			errorMessage = errors.New("Desintation unreachable")
 		case ipv4.ICMPTypeEchoReply:
+			LogEchoMessage(*readMessage)
 			messageBody := readMessage.Body.(*icmp.Echo)
 			if messageBody.ID == messageId && messageBody.Seq == seq {
 				response.Message = readMessage
@@ -112,20 +175,27 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 	rtt := time.Since(begin)
 	response.Rtt = rtt
 
-	return response, err
+	return response, errorMessage
+}
+
+func init() {
+	var verbose bool
+	flag.BoolVar(&verbose, "v", false, "Verbose mode")
+	flag.BoolVar(&verbose, "verbose", false, "Verbose mode")
+	flag.Parse()
+	if verbose == true {
+		log.SetLevel(log.DebugLevel)
+	}
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		log.Fatal("Just a host please")
-	}
-	remoteHost := os.Args[1]
-	log.Println("I will Cyber Path Find", remoteHost)
+	remoteHost := flag.Arg(0)
+	log.Info("CyberPathFinding", remoteHost)
 	remoteIPs, remoteIPLookupErr := net.LookupIP(remoteHost)
 	if remoteIPLookupErr != nil {
 		log.Fatal("DNS LOOKUP FAILED", remoteIPLookupErr)
 	}
-	log.Println("Remote host has IPs", remoteIPs)
+	log.Debug("Remote host has IPs", remoteIPs)
 	var remoteIP4 net.IPAddr
 	for _, ip := range remoteIPs {
 		ip4 := ip.To4()
@@ -136,24 +206,26 @@ func main() {
 	if remoteIP4.IP == nil {
 		log.Fatal("No IP4 address found")
 	}
-	log.Println("Remote host has IP4 IP", remoteIP4.IP)
+	log.Debug("Remote host has IP4 IP", remoteIP4.IP)
 
 	c, err := net.ListenPacket("ip4:1", "0.0.0.0")
 	if err != nil {
-		log.Fatal(err, "\n🤔  Try sudo")
+		log.Fatal(err, "\n🤔  Must be root SORRY")
 	}
 	defer c.Close()
 
 	for i := 1; i <= 64; i++ { // up to 64 hops
 		echoResponse, echoErr := SendICMPEchoMessage(c, remoteIP4, i, i)
 		if echoErr != nil {
-			if echoErr, ok := echoErr.(net.Error); ok && echoErr.Timeout() {
-				log.Println("*")
+			log.Info("*")
+			continue
+			/*if echoErr, ok := echoErr.(net.Error); ok && echoErr.Timeout() {
+				log.Info("*")
 				continue
-			}
+			}*/
 		}
 		names, _ := net.LookupAddr(echoResponse.Source.String())
-		log.Printf("%d\t%v %+v %v", i, echoResponse.Source, names, echoResponse.Rtt)
+		log.Infof("%d\t%v %+v %v", i, echoResponse.Source, names, echoResponse.Rtt)
 		if echoResponse.Message.Type == ipv4.ICMPTypeEchoReply {
 			return
 		}
