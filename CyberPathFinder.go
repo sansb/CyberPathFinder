@@ -136,8 +136,15 @@ func SendICMPEchoMessage(c net.PacketConn, destination net.IPAddr, seq, ttl int)
 				continue
 			}
 			originalMessageBody := originalMessage.Body
-			log.Debug("hi")
+
+			log.Debug("Original message")
+			log.Debug(originalMessage)
+			log.Debug("Original message body")
 			log.Debug(originalMessageBody)
+
+			response.Message = readMessage
+			response.Source = peer
+			response.ControlMessage = controlMessage
 
 			gotResponse = true
 		case ipv4.ICMPTypeDestinationUnreachable:
@@ -219,10 +226,10 @@ func main() {
 		if echoErr != nil {
 			log.Info("*")
 			continue
-			/*if echoErr, ok := echoErr.(net.Error); ok && echoErr.Timeout() {
+			if echoErr, ok := echoErr.(net.Error); ok && echoErr.Timeout() {
 				log.Info("*")
 				continue
-			}*/
+			}
 		}
 		names, _ := net.LookupAddr(echoResponse.Source.String())
 		log.Infof("%d\t%v %+v %v", i, echoResponse.Source, names, echoResponse.Rtt)
